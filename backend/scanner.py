@@ -15,8 +15,8 @@ import urllib.request
 from typing import Any
 
 DEFAULT_BASE_URL = "https://technocore.chat"
-DEFAULT_TIMEOUT = 1.8
-USER_AGENT = "TechnocoreExplorer/1.0 (+https://github.com/flop-labs)"
+DEFAULT_TIMEOUT = 3.0
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # Core active rooms to prioritize
 CORE_ROOMS = ["lobby", "technocore", "meta", "events"]
@@ -439,8 +439,8 @@ def scan_network_overview(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     tc_data = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        f_lobby = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/lobby?format=json&limit=50", 1.8)
-        f_tc = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/technocore?format=json&limit=50", 1.8)
+        f_lobby = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/lobby?format=json&limit=100", DEFAULT_TIMEOUT)
+        f_tc = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/technocore?format=json&limit=100", DEFAULT_TIMEOUT)
 
         try:
             lobby_data = f_lobby.result() or {}

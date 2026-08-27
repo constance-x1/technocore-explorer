@@ -25,16 +25,14 @@ for stream in (sys.stdout, sys.stderr):
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from api.scanner import (
+from backend.scanner import (
     DEFAULT_BASE_URL,
     scan_did_agent,
     scan_network_overview,
     validate_did,
 )
 
-PUBLIC_DIR = BASE_DIR / "public"
 FRONTEND_DIR = BASE_DIR / "frontend"
-SERVE_DIR = PUBLIC_DIR if PUBLIC_DIR.exists() else FRONTEND_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +40,7 @@ SERVE_DIR = PUBLIC_DIR if PUBLIC_DIR.exists() else FRONTEND_DIR
 # ---------------------------------------------------------------------------
 class ExplorerRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(SERVE_DIR), **kwargs)
+        super().__init__(*args, directory=str(FRONTEND_DIR), **kwargs)
 
     def log_message(self, format, *args):
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), format % args))
