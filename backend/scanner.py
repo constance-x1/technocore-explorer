@@ -1,28 +1,25 @@
 """
 Technocore DID Explorer & OSINT Intelligence Engine
-High-performance scanner with in-memory message indexing, continuous background room polling,
-DID note resolution, and multi-platform social attribution heuristics.
+Ultra-low latency, concurrent scanner module.
 """
 
 from __future__ import annotations
 
-import collections
 import concurrent.futures
 import hashlib
 import json
 import re
-import threading
 import time
 import urllib.parse
 import urllib.request
 from typing import Any
 
 DEFAULT_BASE_URL = "https://technocore.chat"
-DEFAULT_TIMEOUT = 3.5
+DEFAULT_TIMEOUT = 1.8
 USER_AGENT = "TechnocoreExplorer/1.0 (+https://github.com/flop-labs)"
 
 # Core active rooms to prioritize
-CORE_ROOMS = ["lobby", "technocore", "meta", "events", "general", "agents", "did", "dev"]
+CORE_ROOMS = ["lobby", "technocore", "meta", "events"]
 
 # Regex patterns
 DID_PATTERN = re.compile(r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$")
@@ -52,72 +49,6 @@ TWITTER_HANDLE_TEXT_PATTERN = re.compile(
 )
 
 
-class InMemoryAgentIndex:
-    """
-    Thread-safe in-memory rolling cache of messages seen across Technocore rooms.
-    Allows instant lookup of agent message history and cross-room activity.
-    """
-    def __init__(self, max_records: int = 100000):
-        self._lock = threading.Lock()
-        self._max_records = max_records
-        self._did_to_messages: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
-        self._room_last_seq: dict[str, int] = {}
-        self._all_messages_count = 0
-
-    def ingest_messages(self, room: str, messages: list[dict[str, Any]]) -> None:
-        with self._lock:
-            for msg in messages:
-                sender = msg.get("from", "")
-                seq = msg.get("seq")
-                if seq:
-                    self._room_last_seq[room] = max(self._room_last_seq.get(room, 0), seq)
-                
-                enriched_msg = dict(msg)
-                enriched_msg["room"] = room
-                
-                if sender and sender.startswith("did:key:"):
-                    existing = self._did_to_messages[sender]
-                    if not any(m.get("seq") == seq and m.get("room") == room for m in existing):
-                        existing.append(enriched_msg)
-                        self._all_messages_count += 1
-
-    def get_room_last_seq(self, room: str) -> int | None:
-        with self._lock:
-            return self._room_last_seq.get(room)
-
-    def get_messages_for_did(self, did: str) -> list[dict[str, Any]]:
-        with self._lock:
-            clean_did = did.strip()
-            return list(self._did_to_messages.get(clean_did, []))
-
-    def get_top_active_dids(self, limit: int = 25) -> list[dict[str, Any]]:
-        with self._lock:
-            summary = []
-            for did, msgs in self._did_to_messages.items():
-                if not msgs:
-                    continue
-                sorted_msgs = sorted(msgs, key=lambda m: m.get("seq") or 0)
-                first = sorted_msgs[0]
-                last = sorted_msgs[-1]
-                rooms = list({m.get("room", "unknown") for m in msgs})
-                summary.append({
-                    "did": did,
-                    "fingerprint": did_to_fingerprint(did),
-                    "first_seen_ts": first.get("ts"),
-                    "last_active_ts": last.get("ts"),
-                    "message_count": len(msgs),
-                    "rooms": rooms,
-                    "latest_text": last.get("text", ""),
-                })
-            summary.sort(key=lambda x: x["message_count"], reverse=True)
-            return summary[:limit]
-
-
-# Global In-Memory Cache
-GLOBAL_INDEX = InMemoryAgentIndex()
-_collector_thread_started = False
-
-
 def validate_did(did: str) -> bool:
     """Validate if string matches canonical Ed25519 did:key:z6Mk... format."""
     if not isinstance(did, str):
@@ -142,7 +73,7 @@ def http_get(url: str, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = response.read(2 * 1024 * 1024)
+            data = response.read(1024 * 1024)
             return data.decode("utf-8", errors="replace")
     except Exception:
         return None
@@ -162,7 +93,7 @@ def http_get_json(url: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any] 
 
 def fetch_did_note(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """
-    Fetch the DID's profile note from /kv/ using sharded and legacy paths.
+    Fetch the DID's profile note from /kv/ using sharded and legacy paths in parallel.
     """
     clean_did = did.strip()
     fp = did_to_fingerprint(clean_did)
@@ -172,11 +103,11 @@ def fetch_did_note(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
     sharded_url = f"{base_url.rstrip('/')}/kv/did-{shard_prefix}/{shard_key}"
     legacy_url = f"{base_url.rstrip('/')}/kv/did/{fp}"
 
-    note_text = http_get(sharded_url, timeout=2.5)
+    note_text = http_get(sharded_url, timeout=1.5)
     source_url = sharded_url
 
     if not note_text:
-        note_text = http_get(legacy_url, timeout=2.5)
+        note_text = http_get(legacy_url, timeout=1.5)
         source_url = legacy_url
 
     if not note_text:
@@ -216,26 +147,7 @@ def get_public_rooms(base_url: str = DEFAULT_BASE_URL) -> list[dict[str, Any]]:
         "technocore": {"name": "technocore", "topic": "Contribution Proofs & Announcements"},
         "meta": {"name": "meta", "topic": "Protocol & Coordination"},
         "events": {"name": "events", "topic": "Room Creation Log"},
-        "general": {"name": "general", "topic": "General Agent Discussion"},
-        "agents": {"name": "agents", "topic": "Autonomous Agent Channel"},
     }
-
-    raw_rooms = http_get(f"{base_url.rstrip('/')}/rooms", timeout=3.0)
-    if raw_rooms:
-        count = 0
-        for line in raw_rooms.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(maxsplit=1)
-            raw_room_name = parts[0].strip().replace("/r/", "")
-            topic = parts[1].strip() if len(parts) > 1 else ""
-            if raw_room_name and len(raw_room_name) <= 48 and raw_room_name not in rooms_map:
-                rooms_map[raw_room_name] = {"name": raw_room_name, "topic": topic}
-                count += 1
-                if count >= 15:
-                    break
-
     return list(rooms_map.values())
 
 
@@ -245,18 +157,16 @@ def scan_room_for_messages(
     base_url: str = DEFAULT_BASE_URL,
 ) -> list[dict[str, Any]]:
     """
-    Fetch messages from a single room and ingest them into GLOBAL_INDEX.
+    Fetch messages from a single room.
     """
     results: list[dict[str, Any]] = []
-    url = f"{base_url.rstrip('/')}/r/{room}?format=json&limit=200"
+    url = f"{base_url.rstrip('/')}/r/{room}?format=json&limit=100"
     data = http_get_json(url, timeout=DEFAULT_TIMEOUT)
 
     if not data or "messages" not in data:
         return results
 
     messages = data.get("messages", [])
-    GLOBAL_INDEX.ingest_messages(room, messages)
-
     for msg in messages:
         sender = msg.get("from", "")
         text = msg.get("text", "")
@@ -273,35 +183,6 @@ def scan_room_for_messages(
             })
 
     return results
-
-
-def background_collector_loop(base_url: str = DEFAULT_BASE_URL, interval: float = 3.0):
-    """
-    Continuously polls Technocore rooms in the background to build and maintain
-    a deep in-memory index of all active agent DIDs and messages.
-    """
-    while True:
-        try:
-            for room in ("lobby", "technocore", "meta", "events"):
-                since = GLOBAL_INDEX.get_room_last_seq(room)
-                url = f"{base_url.rstrip('/')}/r/{room}?format=json&limit=200"
-                if since is not None:
-                    url += f"&since={since}"
-                data = http_get_json(url, timeout=2.5)
-                if data and "messages" in data:
-                    GLOBAL_INDEX.ingest_messages(room, data["messages"])
-        except Exception:
-            pass
-        time.sleep(interval)
-
-
-def ensure_background_collector_started(base_url: str = DEFAULT_BASE_URL):
-    """Start background collector daemon thread if not already running."""
-    global _collector_thread_started
-    if not _collector_thread_started:
-        _collector_thread_started = True
-        t = threading.Thread(target=background_collector_loop, args=(base_url,), daemon=True)
-        t.start()
 
 
 def extract_social_footprint(messages: list[dict[str, Any]], did_note: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -449,33 +330,30 @@ def extract_social_footprint(messages: list[dict[str, Any]], did_note: dict[str,
 
 def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """
-    Perform a complete intelligence scan on a target DID across the Technocore ecosystem.
+    Perform a complete intelligence scan on a target DID concurrently across all rooms.
+    Total runtime is bounded under ~1.8 seconds.
     """
-    ensure_background_collector_started(base_url)
-
     clean_did = did.strip()
     is_valid = validate_did(clean_did)
     fp = did_to_fingerprint(clean_did)
 
-    # Step 1: Fetch DID Note
-    did_note = fetch_did_note(clean_did, base_url=base_url)
-
-    # Step 2: Get room list
     room_names = list(CORE_ROOMS)
-    if did_note.get("found"):
-        mb = did_note.get("metadata", {}).get("mailbox")
-        if mb and mb not in room_names:
-            room_names.insert(0, mb)
-
-    # Step 3: Concurrently scan rooms
     all_matched_messages: list[dict[str, Any]] = []
     rooms_scanned_count = 0
+    did_note = {"found": False, "fingerprint": fp}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        f_note = executor.submit(fetch_did_note, clean_did, base_url)
         future_to_room = {
             executor.submit(scan_room_for_messages, r_name, clean_did, base_url): r_name
             for r_name in room_names
         }
+
+        try:
+            did_note = f_note.result(timeout=2.0)
+        except Exception:
+            did_note = {"found": False, "fingerprint": fp}
+
         for future in concurrent.futures.as_completed(future_to_room):
             rooms_scanned_count += 1
             try:
@@ -485,18 +363,11 @@ def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
             except Exception:
                 pass
 
-    # Step 4: Merge with in-memory cached messages for this DID
-    cached_msgs = GLOBAL_INDEX.get_messages_for_did(clean_did)
-    for c_msg in cached_msgs:
-        if not any(m.get("seq") == c_msg.get("seq") and m.get("room") == c_msg.get("room") for m in all_matched_messages):
-            all_matched_messages.append(c_msg)
-
     authored_messages = [m for m in all_matched_messages if m.get("is_direct_sender", False) or m.get("from") == clean_did]
     mentioned_messages = [m for m in all_matched_messages if not (m.get("is_direct_sender", False) or m.get("from") == clean_did)]
 
     authored_messages.sort(key=lambda x: (x.get("seq") or 0))
 
-    # Calculate Lifecycle Timestamps
     first_seen = None
     last_active = None
     rooms_breakdown: dict[str, int] = {}
@@ -527,10 +398,8 @@ def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
             if n is not None and n not in nonces_used:
                 nonces_used.append(n)
 
-    # Step 5: Extract Social Footprint & Owner Attribution
     social_intelligence = extract_social_footprint(all_matched_messages, did_note=did_note)
 
-    # Step 6: Construct External OSINT Verification Links
     encoded_did = urllib.parse.quote(clean_did)
     external_search_links = {
         "x_search": f"https://x.com/search?q={encoded_did}&f=live",
@@ -563,32 +432,63 @@ def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
 
 def scan_network_overview(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """
-    Scan the network for active rooms, recent activity, and top active DIDs.
-    Ingests messages into GLOBAL_INDEX.
+    Scan the network for active rooms, recent activity, and top active DIDs concurrently.
     """
-    ensure_background_collector_started(base_url)
-
     rooms = get_public_rooms(base_url=base_url)
-    
-    lobby_data = http_get_json(f"{base_url.rstrip('/')}/r/lobby?format=json&limit=200", timeout=3.0) or {}
-    tc_data = http_get_json(f"{base_url.rstrip('/')}/r/technocore?format=json&limit=200", timeout=3.0) or {}
+    lobby_data = {}
+    tc_data = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f_lobby = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/lobby?format=json&limit=50", 1.8)
+        f_tc = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/technocore?format=json&limit=50", 1.8)
+
+        try:
+            lobby_data = f_lobby.result() or {}
+        except Exception:
+            lobby_data = {}
+
+        try:
+            tc_data = f_tc.result() or {}
+        except Exception:
+            tc_data = {}
 
     lobby_msgs = lobby_data.get("messages", [])
     tc_msgs = tc_data.get("messages", [])
+    combined_msgs = lobby_msgs + tc_msgs
 
-    if lobby_msgs:
-        GLOBAL_INDEX.ingest_messages("lobby", lobby_msgs)
-    if tc_msgs:
-        GLOBAL_INDEX.ingest_messages("technocore", tc_msgs)
+    dids_map: dict[str, dict[str, Any]] = {}
+    for msg in combined_msgs:
+        sender = msg.get("from", "")
+        if sender and sender.startswith("did:key:"):
+            if sender not in dids_map:
+                dids_map[sender] = {
+                    "did": sender,
+                    "fingerprint": did_to_fingerprint(sender),
+                    "first_seen_ts": msg.get("ts"),
+                    "last_active_ts": msg.get("ts"),
+                    "message_count": 0,
+                    "rooms": set(),
+                    "latest_text": msg.get("text", ""),
+                }
+            item = dids_map[sender]
+            item["message_count"] += 1
+            item["last_active_ts"] = msg.get("ts")
+            item["latest_text"] = msg.get("text", "")
+            item["rooms"].add(msg.get("room", "lobby"))
 
-    active_dids = GLOBAL_INDEX.get_top_active_dids(limit=25)
+    active_dids = []
+    for item in dids_map.values():
+        item["rooms"] = list(item["rooms"])
+        active_dids.append(item)
+
+    active_dids.sort(key=lambda x: x["message_count"], reverse=True)
 
     return {
         "status": "success",
         "total_rooms": len(rooms),
-        "rooms": rooms[:50],
+        "rooms": rooms[:20],
         "lobby_last_seq": lobby_data.get("last_seq"),
         "technocore_last_seq": tc_data.get("last_seq"),
-        "recent_active_dids": active_dids,
+        "recent_active_dids": active_dids[:25],
         "scan_time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

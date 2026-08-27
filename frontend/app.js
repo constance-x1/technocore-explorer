@@ -1,6 +1,6 @@
 /**
  * Technocore DID Explorer & OSINT Intelligence Dashboard
- * Client-side Controller & UI Renderer
+ * Client-side Controller & UI Renderer with Multi-Route Fallback
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -85,7 +85,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function fetchNetworkOverview() {
     try {
-      const res = await fetch('/api/overview');
+      let res = await fetch('/api/overview').catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch('/api');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       renderNetworkOverview(data);
@@ -173,22 +176,33 @@ document.addEventListener('DOMContentLoaded', () => {
     loadingView.classList.remove('hidden');
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
 
     try {
-      const response = await fetch(`/api/scan?did=${encodeURIComponent(did)}`, {
+      // Try /api/scan?did=... first
+      let response = await fetch(`/api/scan?did=${encodeURIComponent(did)}`, {
         signal: controller.signal,
-      });
+      }).catch(() => null);
+
+      // Fallback to /api?did=... if primary route failed
+      if (!response || !response.ok) {
+        response = await fetch(`/api?did=${encodeURIComponent(did)}`, {
+          signal: controller.signal,
+        });
+      }
+
       clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorJson = await response.json().catch(() => ({}));
         throw new Error(errorJson.error || `Server returned HTTP ${response.status}`);
       }
+
       const data = await response.json();
       if (!data || data.status === 'error' || !data.lifecycle) {
-        throw new Error(data?.error || 'No response data returned for this DID.');
+        throw new Error(data?.error || 'Failed to retrieve agent intelligence for this DID.');
       }
+
       currentScanData = data;
       renderScanResults(data);
     } catch (err) {

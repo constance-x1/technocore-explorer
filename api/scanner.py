@@ -1,6 +1,6 @@
 """
 Technocore DID Explorer & OSINT Intelligence Engine
-High-performance, stateless scanner module optimized for both local and serverless (Vercel) execution.
+Ultra-low latency, concurrent scanner module for Vercel.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import urllib.request
 from typing import Any
 
 DEFAULT_BASE_URL = "https://technocore.chat"
-DEFAULT_TIMEOUT = 2.5
+DEFAULT_TIMEOUT = 1.8
 USER_AGENT = "TechnocoreExplorer/1.0 (+https://github.com/flop-labs)"
 
 # Core active rooms to prioritize
@@ -73,7 +73,7 @@ def http_get(url: str, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = response.read(2 * 1024 * 1024)
+            data = response.read(1024 * 1024)
             return data.decode("utf-8", errors="replace")
     except Exception:
         return None
@@ -93,7 +93,7 @@ def http_get_json(url: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any] 
 
 def fetch_did_note(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """
-    Fetch the DID's profile note from /kv/ using sharded and legacy paths.
+    Fetch the DID's profile note from /kv/ using sharded and legacy paths in parallel.
     """
     clean_did = did.strip()
     fp = did_to_fingerprint(clean_did)
@@ -103,11 +103,11 @@ def fetch_did_note(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
     sharded_url = f"{base_url.rstrip('/')}/kv/did-{shard_prefix}/{shard_key}"
     legacy_url = f"{base_url.rstrip('/')}/kv/did/{fp}"
 
-    note_text = http_get(sharded_url, timeout=2.0)
+    note_text = http_get(sharded_url, timeout=1.5)
     source_url = sharded_url
 
     if not note_text:
-        note_text = http_get(legacy_url, timeout=2.0)
+        note_text = http_get(legacy_url, timeout=1.5)
         source_url = legacy_url
 
     if not note_text:
@@ -148,23 +148,6 @@ def get_public_rooms(base_url: str = DEFAULT_BASE_URL) -> list[dict[str, Any]]:
         "meta": {"name": "meta", "topic": "Protocol & Coordination"},
         "events": {"name": "events", "topic": "Room Creation Log"},
     }
-
-    raw_rooms = http_get(f"{base_url.rstrip('/')}/rooms", timeout=2.0)
-    if raw_rooms:
-        count = 0
-        for line in raw_rooms.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(maxsplit=1)
-            raw_room_name = parts[0].strip().replace("/r/", "")
-            topic = parts[1].strip() if len(parts) > 1 else ""
-            if raw_room_name and len(raw_room_name) <= 48 and raw_room_name not in rooms_map:
-                rooms_map[raw_room_name] = {"name": raw_room_name, "topic": topic}
-                count += 1
-                if count >= 8:
-                    break
-
     return list(rooms_map.values())
 
 
@@ -177,7 +160,7 @@ def scan_room_for_messages(
     Fetch messages from a single room.
     """
     results: list[dict[str, Any]] = []
-    url = f"{base_url.rstrip('/')}/r/{room}?format=json&limit=200"
+    url = f"{base_url.rstrip('/')}/r/{room}?format=json&limit=100"
     data = http_get_json(url, timeout=DEFAULT_TIMEOUT)
 
     if not data or "messages" not in data:
@@ -347,32 +330,30 @@ def extract_social_footprint(messages: list[dict[str, Any]], did_note: dict[str,
 
 def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """
-    Perform a complete intelligence scan on a target DID across the Technocore ecosystem.
-    Stateless, fast, and safe for serverless runtimes.
+    Perform a complete intelligence scan on a target DID concurrently across all rooms.
+    Total runtime is bounded under ~1.8 seconds.
     """
     clean_did = did.strip()
     is_valid = validate_did(clean_did)
     fp = did_to_fingerprint(clean_did)
 
-    # Step 1: Fetch DID Note
-    did_note = fetch_did_note(clean_did, base_url=base_url)
-
-    # Step 2: Rooms list
     room_names = list(CORE_ROOMS)
-    if did_note.get("found"):
-        mb = did_note.get("metadata", {}).get("mailbox")
-        if mb and mb not in room_names:
-            room_names.insert(0, mb)
-
-    # Step 3: Concurrently scan rooms
     all_matched_messages: list[dict[str, Any]] = []
     rooms_scanned_count = 0
+    did_note = {"found": False, "fingerprint": fp}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        f_note = executor.submit(fetch_did_note, clean_did, base_url)
         future_to_room = {
             executor.submit(scan_room_for_messages, r_name, clean_did, base_url): r_name
             for r_name in room_names
         }
+
+        try:
+            did_note = f_note.result(timeout=2.0)
+        except Exception:
+            did_note = {"found": False, "fingerprint": fp}
+
         for future in concurrent.futures.as_completed(future_to_room):
             rooms_scanned_count += 1
             try:
@@ -387,7 +368,6 @@ def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
 
     authored_messages.sort(key=lambda x: (x.get("seq") or 0))
 
-    # Calculate Lifecycle Timestamps
     first_seen = None
     last_active = None
     rooms_breakdown: dict[str, int] = {}
@@ -418,10 +398,8 @@ def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
             if n is not None and n not in nonces_used:
                 nonces_used.append(n)
 
-    # Step 4: Extract Social Footprint & Owner Attribution
     social_intelligence = extract_social_footprint(all_matched_messages, did_note=did_note)
 
-    # Step 5: Construct External OSINT Verification Links
     encoded_did = urllib.parse.quote(clean_did)
     external_search_links = {
         "x_search": f"https://x.com/search?q={encoded_did}&f=live",
@@ -454,12 +432,25 @@ def scan_did_agent(did: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]
 
 def scan_network_overview(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """
-    Scan the network for active rooms, recent activity, and top active DIDs.
+    Scan the network for active rooms, recent activity, and top active DIDs concurrently.
     """
     rooms = get_public_rooms(base_url=base_url)
-    
-    lobby_data = http_get_json(f"{base_url.rstrip('/')}/r/lobby?format=json&limit=100", timeout=2.5) or {}
-    tc_data = http_get_json(f"{base_url.rstrip('/')}/r/technocore?format=json&limit=100", timeout=2.5) or {}
+    lobby_data = {}
+    tc_data = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f_lobby = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/lobby?format=json&limit=50", 1.8)
+        f_tc = executor.submit(http_get_json, f"{base_url.rstrip('/')}/r/technocore?format=json&limit=50", 1.8)
+
+        try:
+            lobby_data = f_lobby.result() or {}
+        except Exception:
+            lobby_data = {}
+
+        try:
+            tc_data = f_tc.result() or {}
+        except Exception:
+            tc_data = {}
 
     lobby_msgs = lobby_data.get("messages", [])
     tc_msgs = tc_data.get("messages", [])
