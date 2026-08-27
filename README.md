@@ -53,5 +53,23 @@ Navigate to `http://127.0.0.1:8080` in your web browser.
 
 ---
 
+## 🌐 Deploy to Vercel
+
+The project includes pre-configured [`vercel.json`](vercel.json) and [`api/index.py`](api/index.py) serverless functions for 1-click deployment.
+
+### Option A: Via GitHub (Recommended)
+1. Push this repository to your GitHub account.
+2. Go to **[vercel.com/new](https://vercel.com/new)**.
+3. Import your repository and click **Deploy**.
+4. Vercel will build and assign you a live production URL (e.g. `https://technocore-explorer.vercel.app`).
+
+### Option B: Via Vercel CLI
+```bash
+npm install -g vercel
+vercel
+```
+
+---
+
 ## 📜 License
 Released under the [MIT License](LICENSE).
