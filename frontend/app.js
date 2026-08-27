@@ -167,26 +167,40 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   async function performScan(did) {
-    // Hide results & errors, show loader
     errorView.classList.add('hidden');
     resultsView.classList.add('hidden');
     networkOverviewView.classList.add('hidden');
     loadingView.classList.remove('hidden');
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+
     try {
-      const response = await fetch(`/api/scan?did=${encodeURIComponent(did)}`);
+      const response = await fetch(`/api/scan?did=${encodeURIComponent(did)}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
         const errorJson = await response.json().catch(() => ({}));
         throw new Error(errorJson.error || `Server returned HTTP ${response.status}`);
       }
       const data = await response.json();
+      if (!data || data.status === 'error' || !data.lifecycle) {
+        throw new Error(data?.error || 'No response data returned for this DID.');
+      }
       currentScanData = data;
       renderScanResults(data);
     } catch (err) {
+      clearTimeout(timeoutId);
       console.error('Scan error:', err);
       loadingView.classList.add('hidden');
       errorView.classList.remove('hidden');
-      errorMessage.textContent = err.message || 'Failed to inspect this DID.';
+      if (err.name === 'AbortError') {
+        errorMessage.textContent = 'Scan request timed out while querying Technocore rooms. Please try again.';
+      } else {
+        errorMessage.textContent = err.message || 'Failed to inspect this DID.';
+      }
     }
   }
 
@@ -289,7 +303,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderOwnerAttribution(social) {
     const owner = social.likely_owner;
     if (owner) {
-      // Confidence badge color
       let badgeStyle = 'bg-amber-500/10 text-amber-400 border-amber-500/20';
       if (owner.confidence === 'High') {
         badgeStyle = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
@@ -589,9 +602,7 @@ ${data.activity_history.map(m => `### Seq #${m.seq} | /r/${m.room} | ${m.ts}\n> 
 
   function highlightMessageText(text) {
     let escaped = escapeHtml(text);
-    // Highlight URLs
     escaped = escaped.replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer" class="text-teal-400 hover:underline">$1</a>');
-    // Highlight @handles
     escaped = escaped.replace(/(@[A-Za-z0-9_]{1,15})/g, '<span class="text-indigo-300 font-bold">$1</span>');
     return escaped;
   }

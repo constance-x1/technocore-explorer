@@ -172,20 +172,35 @@ document.addEventListener('DOMContentLoaded', () => {
     networkOverviewView.classList.add('hidden');
     loadingView.classList.remove('hidden');
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+
     try {
-      const response = await fetch(`/api/scan?did=${encodeURIComponent(did)}`);
+      const response = await fetch(`/api/scan?did=${encodeURIComponent(did)}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
         const errorJson = await response.json().catch(() => ({}));
         throw new Error(errorJson.error || `Server returned HTTP ${response.status}`);
       }
       const data = await response.json();
+      if (!data || data.status === 'error' || !data.lifecycle) {
+        throw new Error(data?.error || 'No response data returned for this DID.');
+      }
       currentScanData = data;
       renderScanResults(data);
     } catch (err) {
+      clearTimeout(timeoutId);
       console.error('Scan error:', err);
       loadingView.classList.add('hidden');
       errorView.classList.remove('hidden');
-      errorMessage.textContent = err.message || 'Failed to inspect this DID.';
+      if (err.name === 'AbortError') {
+        errorMessage.textContent = 'Scan request timed out while querying Technocore rooms. Please try again.';
+      } else {
+        errorMessage.textContent = err.message || 'Failed to inspect this DID.';
+      }
     }
   }
 
