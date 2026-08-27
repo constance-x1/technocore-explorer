@@ -6,22 +6,24 @@ Handles API routing on Vercel's serverless infrastructure.
 from __future__ import annotations
 
 import json
-import os
-import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 
-# Add project root to sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
-
-from backend.scanner import (
-    DEFAULT_BASE_URL,
-    scan_did_agent,
-    scan_network_overview,
-    validate_did,
-)
+# Import from self-contained api package
+try:
+    from .scanner import (
+        DEFAULT_BASE_URL,
+        scan_did_agent,
+        scan_network_overview,
+        validate_did,
+    )
+except ImportError:
+    from scanner import (
+        DEFAULT_BASE_URL,
+        scan_did_agent,
+        scan_network_overview,
+        validate_did,
+    )
 
 
 class handler(BaseHTTPRequestHandler):
